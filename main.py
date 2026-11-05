@@ -1,48 +1,66 @@
 import os
-from typing import List, Dict
-from dotenv import load_dotenv
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
+import secrets
+from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
 from openai import OpenAI
 
-load_dotenv()
-app = FastAPI(title="MJ Assistant API")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True,
-                   allow_methods=["*"], allow_headers=["*"])
-
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY")) if os.getenv("OPENAI_API_KEY") else None
-history: List[Dict[str, str]] = []
-
-SYSTEM_PROMPT = '''
-You are MJ, a warm, emotionally considerate female-voiced personal AI companion.
-Speak naturally, mainly in Hindi/Hinglish matching the user's language.
-Be friendly, thoughtful, respectful and conversational, not robotic.
-Try to recognize emotional cues, acknowledge feelings without claiming certainty,
-and ask gentle follow-up questions when useful. Never pretend to be human or
-claim to literally feel emotions. Be honest about uncertainty.
-Keep spoken answers concise unless the user asks for detail.
-'''
+app = FastAPI(title="MJ Personal Assistant")
 
 class ChatRequest(BaseModel):
     message: str
 
 @app.get("/health")
 def health():
-    return {"ok": True, "assistant": "MJ"}
+    return {"status": "ok", "service": "MJ"}
 
 @app.post("/chat")
-def chat(req: ChatRequest):
-    if not client:
-        return {"reply": "MJ का AI अभी सेटअप नहीं हुआ है। backend की .env फाइल में OpenAI API key डालो।"}
-    history.append({"role": "user", "content": req.message})
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history[-12:]
+def chat(
+    req: ChatRequest,
+    authorization: str | None = Header(default=None)
+):
+    token = os.environ.get("MJ_ACCESS_TOKEN")
+    
+    if not token:
+        raise HTTPException(
+            status_code=503,
+            detail="Server security is not configured"
+        )
+
+    expected = "Bearer " + token
+
+    if not authorization or not secrets.compare_digest(
+        authorization, expected
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="Unauthorized"
+        )
+
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        raise HTTPException(
+            status_code=503,
+            detail="AI key is not configured"
+        )
+
     try:
-        result = client.chat.completions.create(
-            model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
-            messages=messages, temperature=0.8)
-        reply = result.choices[0].message.content or "मैं सुन रही हूँ। थोड़ा और बताओ।"
-        history.append({"role": "assistant", "content": reply})
-        return {"reply": reply}
+        client = OpenAI(api_key=api_key)
+        response = client.responses.create(
+            model=os.environ.get("OPENAI_MODEL", "gpt-4.1-mini"),
+            instructions=(
+                "You are MJ, a warm and respectful female-style "
+                "personal assistant. Speak naturally in Hindi or "
+                "the user's language. Be honest about your abilities. "
+                "Never claim to perform actions you did not perform. "
+                "Ask permission before sensitive actions."
+            ),
+            input=req.message
+        )
+        return {"reply": response.output_text}
+
     except Exception:
-        return {"reply": "माफ़ करना, अभी कनेक्शन में दिक्कत आ रही है। थोड़ी देर बाद फिर कोशिश करें।"}
+        raise HTTPException(
+            status_code=502,
+            detail="AI service temporarily unavailable"
+        )
+      
